@@ -6,6 +6,7 @@ import asyncio
 import gc
 import logging
 import os
+import sys
 import time
 from collections import deque
 from collections.abc import Iterable
@@ -295,14 +296,32 @@ class Screen(Observer):
             )
 
     @staticmethod
-    def _mon_for(x: float, y: float, mons: list[dict]) -> int:
+    def _mon_for(x: float, y: float, mons: list[dict]) -> int | None:
         for idx, m in enumerate(mons, 1):
             if (
                 m["left"] <= x < m["left"] + m["width"]
                 and m["top"] <= y < m["top"] + m["height"]
             ):
                 return idx
-        return idx
+        return None
+
+    @staticmethod
+    def _unrotate_monitors(mons: list[dict]) -> None:
+        """Undo mss's double rotation swap for portrait displays (in place).
+
+        ``CGDisplayBounds`` is already rotation-adjusted, but mss swaps
+        width/height again when rotation is ±90°, so a portrait monitor is
+        reported with landscape bounds.  Cursor positions then match no
+        monitor and get translated by the wrong origin.
+        """
+        if sys.platform != "darwin":
+            return
+        err, ids, _ = Quartz.CGGetActiveDisplayList(len(mons), None, None)  # type: ignore
+        if err != Quartz.kCGErrorSuccess:  # type: ignore
+            return
+        for mon, did in zip(mons, ids):
+            if Quartz.CGDisplayRotation(did) in (90.0, -90.0):  # type: ignore
+                mon["width"], mon["height"] = mon["height"], mon["width"]
 
     async def _run_in_thread(self, func, *args, **kwargs):
         """Run a function in the custom thread pool."""
@@ -417,11 +436,14 @@ class Screen(Observer):
 
         # Draw the cursor box at original coordinates before any resize
         if draw_box:
-            draw = ImageDraw.Draw(image)
-            x1, x2 = max(0, x - 30), min(frame.width, x + 30)
-            y1, y2 = max(0, y - 20), min(frame.height, y + 20)
-            draw.rectangle([x1, y1, x2, y2], outline=box_color, width=box_width)
-            del draw
+            # Clamp both edges into the frame: an off-frame cursor would
+            # otherwise produce an inverted box and PIL raises ValueError.
+            x1, x2 = (min(max(0, v), frame.width) for v in (x - 30, x + 30))
+            y1, y2 = (min(max(0, v), frame.height) for v in (y - 20, y + 20))
+            if x2 > x1 and y2 > y1:
+                draw = ImageDraw.Draw(image)
+                draw.rectangle([x1, y1, x2, y2], outline=box_color, width=box_width)
+                del draw
 
         # Downscale to save disk space and reduce base64 payload for the
         # observer model.  Aspect ratio is preserved; images already within
@@ -600,6 +622,7 @@ class Screen(Observer):
         # ------------------------------------------------------------------
         with mss.mss() as sct:
             mons = sct.monitors[self._MON_START :]
+            self._unrotate_monitors(mons)
             # Expose monitor list so capture_for_hotkey() can resolve cursor position.
             self._mons = mons
 
@@ -814,6 +837,8 @@ class Screen(Observer):
                 if self._note_user_activity():
                     return  # wait for a fresh frame after waking
                 idx = self._mon_for(x, y, mons)
+                if idx is None:
+                    return
                 mon = mons[idx - self._MON_START]
                 x = x - mon["left"]
                 y = y - mon["top"]
