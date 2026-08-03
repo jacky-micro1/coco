@@ -225,6 +225,8 @@ const createOnboardingWindow = () => {
 
 // ── Avatar window ─────────────────────────────────────────────────────────────
 
+const AVATAR_MARGIN = 16;
+
 const createAvatarWindow = () => {
   if (avatarWindow && !avatarWindow.isDestroyed()) return;
   avatarRendererReady = false;
@@ -233,10 +235,14 @@ const createAvatarWindow = () => {
   // 'resize-avatar-window' when a bubble or the history panel becomes visible,
   // and shrinks it back when they go away. Keeps transparent dead-zones from
   // intercepting clicks meant for the desktop below.
+  const avatarArea = screen.getPrimaryDisplay().workArea;
   avatarWindow = new BrowserWindow({
     show: false,
     width: 180,
     height: 180,
+    // Bottom-left of the primary display.
+    x: avatarArea.x + AVATAR_MARGIN,
+    y: avatarArea.y + avatarArea.height - 180 - AVATAR_MARGIN,
     transparent: true,
     frame: false,
     alwaysOnTop: true,
@@ -805,9 +811,13 @@ ipcMain.on(
     const h = Math.max(1, Math.round(height));
     const b = avatarWindow.getBounds();
     if (b.width === w && b.height === h) return;
+    // The pet is anchored bottom-right inside the window, so the window grows
+    // left/up to keep it still.  Near the left edge that would push the bubble
+    // off-screen, so clamp into the work area (the pet shifts right instead).
+    const area = screen.getDisplayMatching(b).workArea;
     avatarWindow.setBounds({
-      x: b.x + b.width - w,
-      y: b.y + b.height - h,
+      x: Math.max(area.x, b.x + b.width - w),
+      y: Math.max(area.y, b.y + b.height - h),
       width: w,
       height: h,
     });
