@@ -13,7 +13,6 @@ downloads/
 venv/
 
 # uv
-uv.lock
 
 # PyInstaller
 *.manifest
