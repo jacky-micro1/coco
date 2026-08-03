@@ -6,7 +6,8 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "memory",
-    "mcp[cli]>=1.8.1",
+    # <2: mcp 2.x dropped `mcp.server.fastmcp`, which server.py imports.
+    "mcp[cli]>=1.8.1,<2",
     "python-dotenv>=1.0.0",
 ]
 
