@@ -127,7 +127,7 @@
     "remark-math": "^6.0.0"
   },
   "devDependencies": {
-    "@electron/rebuild": "^3.7.1",
+    "@electron/rebuild": "^4.2.0",
     "@pmmmwh/react-refresh-webpack-plugin": "^0.5.15",
     "@svgr/webpack": "^8.1.0",
     "@teamsupercell/typings-for-css-modules-loader": "^2.5.2",
@@ -147,10 +147,10 @@
     "core-js": "^3.41.0",
     "cross-env": "^7.0.3",
     "css-loader": "^7.1.2",
-    "css-minimizer-webpack-plugin": "^7.0.2",
+    "css-minimizer-webpack-plugin": "^8.0.0",
     "detect-port": "^2.1.0",
-    "electron": "^35.7.5",
-    "electron-builder": "^25.1.8",
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3",
     "electron-devtools-installer": "^4.0.0",
     "electronmon": "^2.0.3",
     "eslint": "^8.57.1",
