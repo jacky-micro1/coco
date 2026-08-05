@@ -6,8 +6,35 @@ uv run pytest lib/py_utils/py_utils/training_recorder_test.py
 """
 
 import json
+import os
+import sqlite3
+import time
 
 from py_utils.training_recorder import TrainingRecorder
+
+
+def test_training_recorder_removes_only_expired_inactive_sessions(
+    tmp_path, monkeypatch
+):
+    records = tmp_path / "coco-records"
+    current = records / "session_current"
+    expired = records / "session_expired"
+    recent = records / "session_recent"
+    unrelated = records / "exports"
+    for directory in (current, expired, recent, unrelated):
+        directory.mkdir(parents=True)
+        (directory / "keep").write_text("data")
+    nine_days_ago = time.time() - 9 * 24 * 60 * 60
+    os.utime(expired, (nine_days_ago, nine_days_ago))
+    os.utime(unrelated, (nine_days_ago, nine_days_ago))
+    monkeypatch.setenv("COCO_RECORDS_RETENTION_DAYS", "7")
+
+    TrainingRecorder(str(current), retain_screenshots=False)
+
+    assert not expired.exists()
+    assert current.exists()
+    assert recent.exists()
+    assert unrelated.exists()
 
 
 def test_training_recorder_writes_llm_metrics(tmp_path):
@@ -63,3 +90,9 @@ def test_training_recorder_writes_llm_metrics(tmp_path):
     ]
     assert observation_rows[0]["llm_metrics"] == metrics
     assert tutor_rows[0]["llm_metrics"] == metrics
+    with sqlite3.connect(tmp_path / "llm_daily_rollup.db") as conn:
+        rollup = conn.execute(
+            "SELECT day, model, calls, prompt_tokens, completion_tokens, total_tokens "
+            "FROM llm_daily_usage"
+        ).fetchone()
+    assert rollup == ("1970-01-01", "fake-model", 2, 42, 16, 58)

@@ -107,6 +107,10 @@ class StatusResponse(BaseModel):
     total_actions: int
 
 
+class CapturePauseRequest(BaseModel):
+    paused: bool
+
+
 class ObserveUserPromptRequest(BaseModel):
     """Request model for generating an observation on a user prompt."""
 
@@ -250,6 +254,24 @@ async def guidance_delivered():
         progress_detector.reset_cooldown()
     total = await streamer.get_total_stored_actions() if streamer else 0
     return StatusResponse(status="ok", total_actions=total)
+
+
+@app.post("/events/pause", response_model=StatusResponse)
+async def set_capture_pause(request: CapturePauseRequest):
+    """Pause capture and discard state that must not bridge sleep or user pauses."""
+    if screen is None or streamer is None:
+        raise HTTPException(
+            status_code=503, detail="Screen or streamer not initialized"
+        )
+    await screen.set_capture_paused(request.paused)
+    await streamer.discard_buffered_actions()
+    if progress_detector is not None:
+        progress_detector.reset_cooldown()
+        progress_detector.reset_timing()
+    total = await streamer.get_total_stored_actions()
+    return StatusResponse(
+        status="paused" if request.paused else "ok", total_actions=total
+    )
 
 
 @app.post("/config/observer_model", response_model=StatusResponse)
@@ -872,6 +894,11 @@ async def main_async(
         screenshots_dir=screenshot_dir,
         debug=False,
         enable_global_hotkey=False,
+        capture_blocklist=(
+            item.strip()
+            for item in os.environ.get("COCO_CAPTURE_BLOCKLIST", "").split(",")
+            if item.strip()
+        ),
     )
 
     # Initialize hot-key buffer and register the capture callback on the screen.
@@ -952,6 +979,7 @@ async def main_async(
         min_actions_threshold=min_actions_threshold,
         enable_hotkey=False,
         segment_processors=processors,
+        pause_predicate=screen.is_sensing_paused,
     )
 
     try:

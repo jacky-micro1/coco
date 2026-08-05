@@ -49,6 +49,24 @@ def test_text_only_query(monkeypatch):
     ]
 
 
+def test_completion_sets_litellm_retries_and_timeout(monkeypatch):
+    captured: dict = {}
+
+    def fake_completion(**kwargs):
+        captured.update(kwargs)
+        return {
+            "choices": [{"message": {"content": "ok"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        }
+
+    monkeypatch.setattr(litellm_api, "completion", fake_completion)
+
+    get_litellm_completion([{"role": "user", "content": "hello"}], model="test")
+
+    assert captured["num_retries"] == 3
+    assert captured["timeout"] == 60
+
+
 def test_image_query(monkeypatch):
     """Test image message serialization without downloading or inference."""
     captured: dict = {}

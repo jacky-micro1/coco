@@ -162,6 +162,16 @@ class GUM:
         for obs in self.observers:
             await obs.stop()
 
+        if self.engine is not None:
+            try:
+                async with self.engine.connect() as conn:
+                    await conn.execute(sql_text("PRAGMA wal_checkpoint(TRUNCATE)"))
+            except Exception as error:
+                self.logger.warning("SQLite WAL checkpoint failed: %s", error)
+            finally:
+                await self.engine.dispose()
+                self.engine = None
+
     async def _update_loop(self):
         """
         Efficiently wait for *any* observer to produce an Update and

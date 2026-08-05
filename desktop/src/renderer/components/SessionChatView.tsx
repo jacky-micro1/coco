@@ -459,6 +459,7 @@ export default function SessionChatView() {
   const [startingNewSession, setStartingNewSession] = useState(false);
   const [problem, setProblem] = useState('');
   const [expanded, setExpanded] = useState(false);
+  const [capturePaused, setCapturePaused] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -469,15 +470,18 @@ export default function SessionChatView() {
     scenario: string;
     aiTools: string[];
     hideAvatar: boolean;
+    launchAtLogin: boolean;
   }>({
     scenario: 'everyday_support',
     aiTools: [],
     hideAvatar: false,
+    launchAtLogin: false,
   });
   // Editable draft of the settings, synced from the loaded profile.
   const [editScenario, setEditScenario] = useState('everyday_support');
   const [editTools, setEditTools] = useState<string[]>([]);
   const [editHideAvatar, setEditHideAvatar] = useState(false);
+  const [editLaunchAtLogin, setEditLaunchAtLogin] = useState(false);
   const [savedFlash, setSavedFlash] = useState(false);
   // "+ Custom" tool forms (mirrors the onboarding toolkit step).
   const [showAddChatbot, setShowAddChatbot] = useState(false);
@@ -773,11 +777,13 @@ export default function SessionChatView() {
           scenario: typeof p.tutorScenario === 'string' ? p.tutorScenario : 'everyday_support',
           aiTools: Array.isArray(p.aiTools) ? p.aiTools : [],
           hideAvatar: p.hideAvatar === true,
+          launchAtLogin: p.launchAtLogin === true,
         };
         setProfile(next);
         setEditScenario(next.scenario);
         setEditTools(next.aiTools);
         setEditHideAvatar(next.hideAvatar);
+        setEditLaunchAtLogin(next.launchAtLogin);
       })
       .catch(() => {});
   }, []);
@@ -812,12 +818,14 @@ export default function SessionChatView() {
       scenario: editScenario,
       aiTools: editTools,
       hideAvatar: editHideAvatar,
+      launchAtLogin: editLaunchAtLogin,
     });
     if ((res as { success?: boolean })?.success) {
       setProfile({
         scenario: editScenario,
         aiTools: editTools,
         hideAvatar: editHideAvatar,
+        launchAtLogin: editLaunchAtLogin,
       });
       setSavedFlash(true);
       setTimeout(() => setSavedFlash(false), 1500);
@@ -827,6 +835,7 @@ export default function SessionChatView() {
   const dirty =
     editScenario !== profile.scenario ||
     editHideAvatar !== profile.hideAvatar ||
+    editLaunchAtLogin !== profile.launchAtLogin ||
     editTools.length !== profile.aiTools.length ||
     editTools.some((t) => !profile.aiTools.includes(t));
 
@@ -1003,6 +1012,15 @@ export default function SessionChatView() {
     !sending &&
     !startingNewSession &&
     (input.trim().length > 0 || pendingImages.length > 0);
+
+  const toggleCapture = async () => {
+    const paused = !capturePaused;
+    const result = await window.electron?.ipcRenderer.invoke(
+      'set-capture-paused',
+      { paused },
+    );
+    if ((result as { success?: boolean })?.success) setCapturePaused(paused);
+  };
   const visibleMessages = reviewing?.messages ?? messages;
   const hasRunningTool = visibleMessages.some(
     (message) =>
@@ -1017,6 +1035,14 @@ export default function SessionChatView() {
           <span style={S.statusDot} /> Coco <span style={S.sub}>· Session active</span>
         </span>
         <div style={S.headerBtns}>
+          <button
+            type="button"
+            style={{ ...S.newSessionBtn, ...(capturePaused ? S.iconBtnActive : {}) }}
+            title={capturePaused ? 'Resume screen capture' : 'Pause screen capture'}
+            onClick={toggleCapture}
+          >
+            {capturePaused ? 'Resume sensing' : 'Pause sensing'}
+          </button>
           <button
             type="button"
             style={{
@@ -1083,6 +1109,20 @@ export default function SessionChatView() {
               <span style={S.toggleHelp}>
                 Keep Coco in the system tray and show proactive suggestions as
                 notifications.
+              </span>
+            </span>
+          </label>
+          <label style={S.toggleRow} htmlFor="launch-at-login">
+            <input
+              id="launch-at-login"
+              type="checkbox"
+              checked={editLaunchAtLogin}
+              onChange={(e) => setEditLaunchAtLogin(e.target.checked)}
+            />
+            <span>
+              <strong style={S.toggleTitle}>Launch Coco at login</strong>
+              <span style={S.toggleHelp}>
+                Start Coco automatically after you sign in. Off by default.
               </span>
             </span>
           </label>

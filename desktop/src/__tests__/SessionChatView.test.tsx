@@ -1,7 +1,39 @@
 import React from 'react';
 import '@testing-library/jest-dom';
-import { render, screen } from '@testing-library/react';
-import { ToolCallCard } from '../renderer/components/SessionChatView';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import SessionChatView, {
+  ToolCallCard,
+} from '../renderer/components/SessionChatView';
+
+test('launch at login defaults off and is saved only when selected', async () => {
+  const invoke = jest.fn((channel: string) => {
+    if (channel === 'get-profile') return Promise.resolve({});
+    if (channel === 'update-settings') return Promise.resolve({ success: true });
+    if (channel === 'get-memory') return Promise.resolve({ memory: '' });
+    return Promise.resolve([]);
+  });
+  (window as any).electron = {
+    ipcRenderer: {
+      invoke,
+      on: jest.fn(() => jest.fn()),
+      sendMessage: jest.fn(),
+    },
+  };
+  render(<SessionChatView />);
+
+  fireEvent.click(screen.getByTitle('Settings'));
+  const toggle = await screen.findByLabelText(/Launch Coco at login/);
+  expect(toggle).not.toBeChecked();
+  fireEvent.click(toggle);
+  fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+  await waitFor(() =>
+    expect(invoke).toHaveBeenCalledWith(
+      'update-settings',
+      expect.objectContaining({ launchAtLogin: true }),
+    ),
+  );
+});
 
 describe('Tutor tool-call visualization', () => {
   it('shows on-demand screen observation progress and evidence', () => {

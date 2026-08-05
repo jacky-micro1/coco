@@ -114,6 +114,31 @@ def _is_app_visible(names: Iterable[str]) -> bool:
     )
 
 
+def _frontmost_window_matches(patterns: Iterable[str]) -> bool:
+    """Match the frontmost app name or window title, case-insensitively."""
+    targets = [pattern.strip().casefold() for pattern in patterns if pattern.strip()]
+    if not targets:
+        return False
+    try:
+        visible = _get_visible_windows()
+    except Exception as error:
+        logging.getLogger("Screen").error(
+            "Could not inspect frontmost window; suppressing capture",
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        return True
+    if not visible:
+        return False
+    info = visible[0][0]
+    values = (
+        str(info.get("kCGWindowOwnerName", "")).casefold(),
+        str(info.get("kCGWindowName", "")).casefold(),
+    )
+    # ponytail: substring matching is the ceiling; add regex/rules only if
+    # real user blocklists cannot be expressed as app/title fragments.
+    return any(target in value for target in targets for value in values)
+
+
 ###############################################################################
 # Screen observer                                                             #
 ###############################################################################
@@ -161,6 +186,7 @@ class Screen(Observer):
         scroll_session_timeout: float = 2.0,
         enable_global_hotkey: bool = False,
         sensing_idle_timeout: float = 300.0,
+        capture_blocklist: Iterable[str] = (),
     ) -> None:
         self.screens_dir = os.path.abspath(os.path.expanduser(screenshots_dir))
         os.makedirs(self.screens_dir, exist_ok=True)
@@ -179,6 +205,7 @@ class Screen(Observer):
             if isinstance(skip_when_visible, str)
             else set(skip_when_visible or [])
         )
+        self._capture_blocklist = tuple(capture_blocklist)
 
         self.debug = debug
 
@@ -226,6 +253,10 @@ class Screen(Observer):
         self._on_hotkey_callback = None
         self._enable_global_hotkey = enable_global_hotkey
         self._activity_monitor = SensingActivityMonitor(sensing_idle_timeout)
+        self._capture_paused = False
+        self._privacy_blocked = False
+        self._background_tasks: set[asyncio.Task] = set()
+        self._background_failure_count = 0
 
         # Monitor list populated once the _worker starts mss — used by
         # capture_for_hotkey() to determine which monitor is under the cursor.
@@ -260,13 +291,58 @@ class Screen(Observer):
 
     def is_sensing_paused(self) -> bool:
         """Return whether capture is dormant because the laptop/user is idle."""
-        return self._activity_monitor.paused
+        return (
+            self._capture_paused
+            or self._privacy_blocked
+            or self._activity_monitor.paused
+        )
+
+    async def set_capture_paused(self, paused: bool) -> None:
+        """Pause/resume capture after discarding state that cannot cross the gap."""
+        self._capture_paused = paused
+        await self._discard_capture_state()
+
+    async def _discard_capture_state(self) -> None:
+        self._pending_event = None
+        if self._debounce_handle:
+            self._debounce_handle.cancel()
+            self._debounce_handle = None
+        self._key_activity_start = None
+        self._key_screenshots = []
+        async with self._frame_lock:
+            self._frames.clear()
+        tasks = list(self._background_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def _note_user_activity(self) -> bool:
         """Record input, returning True if this input woke dormant sensing."""
         self._last_active_click_time = time.time()
         self._idle_triggered = False
         return self._activity_monitor.note_activity()
+
+    def _create_background_task(self, coro, context: str) -> None:
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+
+        def finish(done: asyncio.Task) -> None:
+            self._background_tasks.discard(done)
+            if done.cancelled():
+                return
+            error = done.exception()
+            if error is None:
+                return
+            self._background_failure_count += 1
+            logging.getLogger("Screen").error(
+                "%s failed (background failures: %d)",
+                context,
+                self._background_failure_count,
+                exc_info=(type(error), error, error.__traceback__),
+            )
+
+        task.add_done_callback(finish)
 
     def register_on_idle(self, callback):
         """Register a callback to be called when idle is detected."""
@@ -287,12 +363,13 @@ class Screen(Observer):
         """Handle a user prompt event."""
         image_path, timestamp = await self._inspect()
         if self._on_user_prompt_callback:
-            asyncio.create_task(
+            self._create_background_task(
                 self._on_user_prompt_callback(
                     user_text=user_text,
                     image_path=image_path,
                     timestamp=timestamp,
-                )
+                ),
+                "user prompt callback",
             )
 
     @staticmethod
@@ -512,7 +589,10 @@ class Screen(Observer):
 
     # ─────────────────────────────── skip guard
     def _skip(self) -> bool:
-        return _is_app_visible(self._guard) if self._guard else False
+        return (bool(self._guard) and _is_app_visible(self._guard)) or (
+            bool(self._capture_blocklist)
+            and _frontmost_window_matches(self._capture_blocklist)
+        )
 
     # ─────────────────────────────── inspect current frame screenshot
     async def _inspect(self) -> tuple[str, str]:
@@ -592,7 +672,10 @@ class Screen(Observer):
         print(f"[HOTKEY CAPTURE] saved to: {path} at {ts}")
 
         if self._on_hotkey_callback:
-            asyncio.create_task(self._on_hotkey_callback(image_path=path, timestamp=ts))
+            self._create_background_task(
+                self._on_hotkey_callback(image_path=path, timestamp=ts),
+                "hotkey callback",
+            )
 
         return path, ts
 
@@ -726,7 +809,11 @@ class Screen(Observer):
 
             def debounce_flush():
                 # callback from loop.call_later → must create task
-                asyncio.create_task(flush())
+                event = self._pending_event or {}
+                self._create_background_task(
+                    flush(),
+                    f"flush {event.get('type', 'event')} eid={event.get('eid', 'unknown')}",
+                )
 
             # ---- keyboard event reception ----
             async def key_event(key, typ: str):
@@ -779,7 +866,10 @@ class Screen(Observer):
 
                     # Schedule cleanup of previous intermediate screenshots
                     if len(self._key_screenshots) > 2:
-                        asyncio.create_task(self._cleanup_key_screenshots())
+                        self._create_background_task(
+                            self._cleanup_key_screenshots(),
+                            "keyboard screenshot cleanup",
+                        )
 
             # ---- scroll event reception ----
             async def scroll_event(x: float, y: float, dx: float, dy: float):
@@ -886,11 +976,28 @@ class Screen(Observer):
             log.info(f"Screen observer started — guarding {self._guard or '∅'}")
             frame_count = 0
             was_sensing_paused = False
+            was_privacy_blocked = False
 
             while self._running:  # flag from base class
                 t0 = time.time()
 
-                sensing_paused = self._activity_monitor.refresh()
+                privacy_blocked = bool(
+                    self._capture_blocklist
+                    and _frontmost_window_matches(self._capture_blocklist)
+                )
+                self._privacy_blocked = privacy_blocked
+                if privacy_blocked:
+                    if not was_privacy_blocked:
+                        log.info("Screen observer blocked by privacy setting")
+                        await self._discard_capture_state()
+                    was_privacy_blocked = True
+                    await asyncio.sleep(1.0)
+                    continue
+                was_privacy_blocked = False
+
+                sensing_paused = (
+                    self._capture_paused or self._activity_monitor.refresh()
+                )
                 if sensing_paused:
                     if not was_sensing_paused:
                         log.info(
@@ -975,10 +1082,11 @@ class Screen(Observer):
                     log.info("Idle state detected.")
                     image_path, timestamp = await self._inspect()
                     if self._on_idle_callback:
-                        asyncio.create_task(
+                        self._create_background_task(
                             self._on_idle_callback(
                                 image_path=image_path, timestamp=timestamp
-                            )
+                            ),
+                            "idle callback",
                         )
 
                 # fps throttle

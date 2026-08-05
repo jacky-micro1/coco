@@ -2,7 +2,7 @@ import { spawn, ChildProcess, execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { app } from 'electron';
+import { app, Notification } from 'electron';
 import log from 'electron-log';
 
 export interface ServiceConfig {
@@ -98,7 +98,14 @@ export class ServiceManager {
 
   /** register a spawned child process into the global registry */
   public registerProcess(id: string, proc: ChildProcess, cfg?: ServiceConfig) {
-    this.services.set(id, { process: proc, config: cfg, status: 'running' });
+    const existing = this.services.get(id);
+    if (existing) {
+      existing.process = proc;
+      existing.config ||= cfg;
+      existing.status = 'running';
+    } else {
+      this.services.set(id, { process: proc, config: cfg, status: 'running' });
+    }
 
     proc.on('error', (err) => {
       log.error(`[ServiceManager] child ${id} error`, err);
@@ -308,7 +315,7 @@ export class ServiceManager {
     ].join(path.delimiter);
     const augmentedPath = `${extraPaths}${path.delimiter}${process.env.PATH || ''}`;
 
-    let env = {
+    let env: NodeJS.ProcessEnv = {
       ...process.env,
       ...cfgEnvNonEmpty,
       PYTHONIOENCODING: 'utf-8',
@@ -402,7 +409,7 @@ export class ServiceManager {
       env = {
         ...env,
         ELECTRON_RUN_AS_NODE: '1',
-        PATH: process.env.PATH,
+        PATH: process.env.PATH || augmentedPath,
         // Only fix LOCALAPPDATA on Windows to prevent cache write errors
         ...(isWin
           ? {
@@ -452,9 +459,31 @@ export class ServiceManager {
         const maxRestarts = cfg.maxRestartsInWindow || 3;
         if ((svc.crashTimestamps || []).length >= maxRestarts) {
           svc.status = 'error';
-          log.warn(
-            `[ServiceManager] ${id} exceeded max restarts (${maxRestarts}) within ${windowMs}ms, not restarting`,
+          const retryDelay = Math.max(
+            1,
+            windowMs - (now - svc.crashTimestamps[0]),
           );
+          log.warn(
+            `[ServiceManager] ${id} exceeded max restarts (${maxRestarts}) within ${windowMs}ms; retrying in ${retryDelay}ms`,
+          );
+          try {
+            new Notification({
+              title: 'Coco service recovering',
+              body: `The ${id} service crashed repeatedly. Coco will retry automatically.`,
+            }).show();
+          } catch (error) {
+            log.warn('[ServiceManager] could not show restart notification', error);
+          }
+          // ponytail: re-arm at the rolling-window boundary; add health-check
+          // orchestration only if timed recovery proves insufficient.
+          svc.restartTimer = setTimeout(() => {
+            svc.restartTimer = null;
+            const retryAt = Date.now();
+            svc.crashTimestamps = (svc.crashTimestamps || []).filter(
+              (t) => retryAt - t < windowMs,
+            );
+            this.startService(id);
+          }, retryDelay);
           return;
         }
 
@@ -680,15 +709,15 @@ export class ServiceManager {
     const s = this.services.get(id);
     if (!s) return;
 
-    if (!s.process) {
-      s.status = 'stopped';
-      return;
-    }
-
     // cancel pending restart if any
     if (s.restartTimer) {
       clearTimeout(s.restartTimer);
       s.restartTimer = null;
+    }
+
+    if (!s.process) {
+      s.status = 'stopped';
+      return;
     }
 
     const proc = s.process;

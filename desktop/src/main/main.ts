@@ -144,6 +144,7 @@ const flushHotkeyCaptures = () => {
 // True once the Python services have been started. Guards against double-start
 // and lets us defer startup until the user has chosen their models.
 let observerStarted = false;
+let userCapturePaused = false;
 // isFloatMode: chat panel is in narrow side-panel mode (vs. expanded width).
 let isFloatMode = true;
 // Set true once the app is genuinely quitting so window 'close' handlers stop
@@ -169,6 +170,23 @@ const readHideAvatarSetting = (): boolean => {
     return profile?.hideAvatar === true;
   } catch {
     return false;
+  }
+};
+
+const readLaunchAtLoginSetting = (): boolean => {
+  try {
+    const profile = JSON.parse(fs.readFileSync(profilePath(), 'utf-8'));
+    return profile?.launchAtLogin === true;
+  } catch {
+    return false;
+  }
+};
+
+const applyLoginItemSetting = (openAtLogin: boolean) => {
+  try {
+    app.setLoginItemSettings({ openAtLogin });
+  } catch (error) {
+    log.warn('[Settings] Could not update launch-at-login', error);
   }
 };
 
@@ -1579,10 +1597,12 @@ ipcMain.handle(
       scenario,
       aiTools,
       hideAvatar,
+      launchAtLogin,
     }: {
       scenario: string;
       aiTools: string[];
       hideAvatar: boolean;
+      launchAtLogin: boolean;
     },
   ) => {
     // 1. Persist into the profile (merged with existing fields). Models are
@@ -1597,6 +1617,7 @@ ipcMain.handle(
       profile.tutorScenario = scenario;
       profile.aiTools = aiTools;
       profile.hideAvatar = hideAvatar === true;
+      profile.launchAtLogin = launchAtLogin === true;
       fs.writeFileSync(profilePath(), JSON.stringify(profile, null, 2), 'utf-8');
     } catch (err) {
       log.error('[Settings] Failed to persist profile:', err);
@@ -1605,6 +1626,7 @@ ipcMain.handle(
 
     // Apply the desktop presentation immediately; no restart is required.
     applyAvatarVisibility(hideAvatar === true);
+    applyLoginItemSetting(launchAtLogin === true);
 
     // 2. Apply live to the running servers (best-effort).
     const sensingPort = process.env.SENSING_PORT || '8080';
@@ -1637,6 +1659,30 @@ ipcMain.handle(
       }
     }
     return { success: true };
+  },
+);
+
+async function setSensingCapturePaused(paused: boolean) {
+  const sensingPort = process.env.SENSING_PORT || '8080';
+  await axios.post(
+    `http://127.0.0.1:${sensingPort}/events/pause`,
+    { paused },
+    { timeout: 3000 },
+  );
+}
+
+ipcMain.removeHandler('set-capture-paused');
+ipcMain.handle(
+  'set-capture-paused',
+  async (_event, { paused }: { paused: boolean }) => {
+    try {
+      await setSensingCapturePaused(paused === true);
+      userCapturePaused = paused === true;
+      return { success: true, paused: paused === true };
+    } catch (error) {
+      log.warn('[Privacy] Could not update sensing pause', error);
+      return { success: false, error: String(error) };
+    }
   },
 );
 
@@ -1965,6 +2011,8 @@ app
   .then(() => {
     powerMonitor.on('suspend', () => {
       log.info('[Power] System suspended; clearing proactive UI and cache.');
+      setSensingCapturePaused(true)
+        .catch((error) => log.warn('[Power] Could not pause sensing', error));
       observationSleepGuard.suspend();
       latestHiddenSuggestionObservationId = undefined;
       suggestionCache.clear();
@@ -1977,6 +2025,8 @@ app
 
     powerMonitor.on('resume', () => {
       log.info('[Power] System resumed; suppressing observations briefly.');
+      setSensingCapturePaused(userCapturePaused)
+        .catch((error) => log.warn('[Power] Could not resume sensing', error));
       observationSleepGuard.resume();
       latestHiddenSuggestionObservationId = undefined;
       suggestionCache.clear();
@@ -1991,6 +2041,7 @@ app
 
     // Ensure default workspace directory exists
     ensureDefaultWorkspaceExists();
+    applyLoginItemSetting(readLaunchAtLoginSetting());
 
     // Only start the observer if onboarding is already done. If not, it will
     // be started by the 'onboarding-complete' IPC handler after the user

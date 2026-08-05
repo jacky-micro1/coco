@@ -98,7 +98,7 @@ def get_litellm_completion(
     if tool_choice is not None:
         kwargs["tool_choice"] = tool_choice
 
-    response = completion(**kwargs)
+    response = completion(**kwargs, num_retries=3, timeout=60)
     if stream:
         text_parts: list[str] = []
         tool_call_parts: dict[int, dict[str, str]] = {}

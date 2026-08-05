@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from unittest.mock import AsyncMock
 
 from sensing.screen import Screen
@@ -54,3 +55,25 @@ def test_inspect_returns_empty_before_first_frame():
 
     assert result == ("", "")
     screen._save_frame.assert_not_awaited()
+
+
+def test_background_event_failure_is_logged_once_and_counted(caplog):
+    async def run():
+        screen = Screen.__new__(Screen)
+        screen._background_tasks = set()
+        screen._background_failure_count = 0
+
+        async def fail():
+            raise RuntimeError("disk full")
+
+        screen._create_background_task(fail(), "flush click eid=42")
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        return screen
+
+    with caplog.at_level(logging.ERROR, logger="Screen"):
+        screen = asyncio.run(run())
+
+    assert screen._background_failure_count == 1
+    messages = [record.getMessage() for record in caplog.records]
+    assert messages == ["flush click eid=42 failed (background failures: 1)"]

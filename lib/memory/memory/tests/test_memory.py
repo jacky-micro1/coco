@@ -8,6 +8,7 @@ uv run pytest lib/memory/memory/tests/test_memory.py
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 
 from memory import MemoryEngine, MemoryStore, ObservationInput
@@ -59,6 +60,30 @@ def test_store_searches_propositions_and_returns_evidence(tmp_path):
 
     assert hits[0].proposition.confidence == 8
     assert hits[0].observations[0].id == "o1"
+
+
+def test_search_excludes_expired_low_confidence_propositions(tmp_path):
+    store = MemoryStore(tmp_path / "memory.db")
+    from memory.models import PropositionDraft
+
+    expired_id = store.insert_proposition(
+        PropositionDraft("Temporary detail", "Weak old evidence", 1, 1), []
+    )
+    durable_id = store.insert_proposition(
+        PropositionDraft("Durable preference", "Strong lasting evidence", 10, 10),
+        [],
+    )
+    ten_days_ago = time.time() - 10 * 86400
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute(
+            "UPDATE propositions SET updated_at=? WHERE id IN (?, ?)",
+            (ten_days_ago, expired_id, durable_id),
+        )
+
+    hits = store.search(limit=10, include_observations=0)
+
+    assert [hit.proposition.id for hit in hits] == [durable_id]
+    assert hits[0].score > 0.4
 
 
 def test_store_can_find_proposition_through_supporting_observation(tmp_path):

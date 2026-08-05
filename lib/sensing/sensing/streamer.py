@@ -500,6 +500,35 @@ class Streamer:
             if hasattr(proc, "configure_session"):
                 await cast(AiTutoringProcessor, proc).configure_session()
 
+    async def discard_buffered_actions(self) -> None:
+        """Drop action state that cannot safely span a capture pause."""
+        latest_id = await asyncio.to_thread(self._latest_observation_id)
+        async with self._lock:
+            self._stored_actions.clear()
+            self._last_processed_id = latest_id
+            self._last_processed_id_tmp = latest_id
+
+    def _latest_observation_id(self) -> int:
+        if not os.path.exists(self.db_path):
+            return 0
+        engine = create_engine(f"sqlite:///{self.db_path}")
+        try:
+            with engine.connect() as connection:
+                if not connection.execute(
+                    text(
+                        "SELECT 1 FROM sqlite_master "
+                        "WHERE type='table' AND name='observations'"
+                    )
+                ).fetchone():
+                    return 0
+                return int(
+                    connection.execute(
+                        text("SELECT COALESCE(MAX(id), 0) FROM observations")
+                    ).scalar_one()
+                )
+        finally:
+            engine.dispose()
+
     async def set_problem_statement(self, problem_statement: str) -> None:
         """Delegate to the first processor that supports ``set_problem_statement``."""
         for proc in self._segment_processors:

@@ -33,12 +33,17 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import threading
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 from py_utils.logging import init_logger
 
 logger = init_logger(__name__)
+
+_DEFAULT_RETENTION_DAYS = 7
 
 
 def _screenshots_enabled() -> bool:
@@ -60,6 +65,40 @@ def default_records_dir(fallback: str | None = None) -> str:
     return os.path.expanduser("~/Downloads/coco-records")
 
 
+def _sweep_old_sessions(current_dir: Path) -> None:
+    if not current_dir.name.startswith("session_"):
+        return
+    try:
+        retention_days = int(
+            os.getenv("COCO_RECORDS_RETENTION_DAYS", str(_DEFAULT_RETENTION_DAYS))
+        )
+        if retention_days < 0:
+            raise ValueError
+    except ValueError:
+        logger.warning(
+            "Invalid COCO_RECORDS_RETENTION_DAYS; using %d",
+            _DEFAULT_RETENTION_DAYS,
+        )
+        retention_days = _DEFAULT_RETENTION_DAYS
+
+    cutoff = time.time() - retention_days * 24 * 60 * 60
+    current = current_dir.resolve()
+    # ponytail: age-only session cleanup; add a size quota only if age proves
+    # insufficient, keeping the active-directory exclusion as the safety gate.
+    for session_dir in current_dir.parent.glob("session_*"):
+        try:
+            if (
+                session_dir.resolve() != current
+                and session_dir.stat().st_mtime < cutoff
+            ):
+                shutil.rmtree(session_dir)
+                logger.info("Removed expired Coco records session %s", session_dir)
+        except FileNotFoundError:
+            pass  # The sibling service may have swept the same session.
+        except OSError as e:
+            logger.warning("Could not remove expired session %s: %s", session_dir, e)
+
+
 class TrainingRecorder:
     """Best-effort writer for observation / decision / episode training rows."""
 
@@ -69,6 +108,10 @@ class TrainingRecorder:
         self._dec_path = self._dir / "decisions.jsonl"
         self._epi_path = self._dir / "episodes.jsonl"
         self._shot_dir = self._dir / "observer_screenshots"
+        records_root = (
+            self._dir.parent if self._dir.name.startswith("session_") else self._dir
+        )
+        self._rollup_path = records_root / "llm_daily_rollup.db"
         self._retain = (
             _screenshots_enabled() if retain_screenshots is None else retain_screenshots
         )
@@ -76,6 +119,7 @@ class TrainingRecorder:
         self._lock = threading.Lock()
         try:
             self._dir.mkdir(parents=True, exist_ok=True)
+            _sweep_old_sessions(self._dir)
         except OSError as e:
             logger.warning(f"TrainingRecorder: could not create {self._dir}: {e}")
         logger.info(
@@ -135,6 +179,8 @@ class TrainingRecorder:
         if llm_metrics is not None:
             row["llm_metrics"] = llm_metrics
         self._append(self._obs_path, row)
+        if llm_metrics is not None:
+            self._rollup_llm_metrics(row)
 
     def log_decision(
         self,
@@ -229,6 +275,8 @@ class TrainingRecorder:
         if llm_metrics is not None:
             row["llm_metrics"] = llm_metrics
         self._append(self._dir / "tutor_calls.jsonl", row)
+        if llm_metrics is not None:
+            self._rollup_llm_metrics(row)
 
     def log_feedback(
         self,
@@ -298,3 +346,49 @@ class TrainingRecorder:
                     f.write(line + "\n")
         except Exception as e:
             logger.debug(f"TrainingRecorder: append to {path.name} failed: {e}")
+
+    def _rollup_llm_metrics(self, row: dict) -> None:
+        metrics = row["llm_metrics"]
+        try:
+            day = (
+                datetime.fromtimestamp(
+                    float(metrics.get("started_at") or row.get("ts") or time.time()),
+                    tz=UTC,
+                )
+                .date()
+                .isoformat()
+            )
+            model = str(metrics.get("model") or row.get("model") or "unknown")
+            values = (
+                day,
+                model,
+                1,
+                int(metrics.get("prompt_tokens") or 0),
+                int(metrics.get("completion_tokens") or 0),
+                int(metrics.get("total_tokens") or 0),
+            )
+            # ponytail: SQLite is the cross-process atomic rollup; add a UI
+            # only when users need more than day/model call and token totals.
+            with sqlite3.connect(self._rollup_path, timeout=30) as conn:
+                conn.execute(
+                    """CREATE TABLE IF NOT EXISTS llm_daily_usage (
+                           day TEXT NOT NULL,
+                           model TEXT NOT NULL,
+                           calls INTEGER NOT NULL,
+                           prompt_tokens INTEGER NOT NULL,
+                           completion_tokens INTEGER NOT NULL,
+                           total_tokens INTEGER NOT NULL,
+                           PRIMARY KEY (day, model)
+                       )"""
+                )
+                conn.execute(
+                    """INSERT INTO llm_daily_usage VALUES (?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(day, model) DO UPDATE SET
+                           calls=calls + excluded.calls,
+                           prompt_tokens=prompt_tokens + excluded.prompt_tokens,
+                           completion_tokens=completion_tokens + excluded.completion_tokens,
+                           total_tokens=total_tokens + excluded.total_tokens""",
+                    values,
+                )
+        except Exception as e:
+            logger.debug(f"TrainingRecorder: LLM daily rollup failed: {e}")

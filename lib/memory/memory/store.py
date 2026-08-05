@@ -525,7 +525,14 @@ class MemoryStore:
                 age_days = max(0.0, (time.time() - float(row["updated_at"])) / 86400)
                 durability = max(1, min(10, int(row["decay"] or 5)))
                 half_life_days = 1.0 + (durability - 1) * 40.0
-                score = lexical * math.exp(-math.log(2) * age_days / half_life_days)
+                freshness = math.exp(-math.log(2) * age_days / half_life_days)
+                confidence = max(1, min(10, int(row["confidence"] or 5))) / 10
+                strength = confidence * freshness
+                # ponytail: omit effectively expired hits at retrieval time;
+                # add physical pruning only if database size becomes material.
+                if strength < 0.01:
+                    continue
+                score = lexical * strength
                 hits.append(
                     PropositionHit(self._proposition(row), score, observations, updates)
                 )

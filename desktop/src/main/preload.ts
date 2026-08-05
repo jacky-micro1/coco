@@ -47,6 +47,7 @@ export type Channels =
   // Settings (post-onboarding profile edits)
   | 'save-profile'
   | 'update-settings'
+  | 'set-capture-paused'
   // Long-term agent memory (view/edit)
   | 'get-memory'
   | 'save-memory'
